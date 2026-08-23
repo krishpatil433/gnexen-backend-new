@@ -1,13 +1,12 @@
 // ============================================================
-// GNEXEN REWARD - BACKEND
-// Supabase + FaucetPay Automatic Payments + Faucet System
+// GNEXEN REWARD - BACKEND (Without Faucet)
+// User Panel + Admin Panel + Tasks + Withdrawals
 // ============================================================
 
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
-const axios = require('axios');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,8 +14,8 @@ const PORT = process.env.PORT || 3000;
 // ============================================================
 // SUPABASE CONFIG
 // ============================================================
-const supabaseUrl = process.env.SUPABASE_URL || 'https://ogkavpsfbihxbodvzppj.supabase.co';
-const supabaseKey = process.env.SUPABASE_ANON_KEY || 'sb_publishable_W4JV0K8shyAgOE0BUG6WPw_teElLVsE';
+const supabaseUrl = process.env.SUPABASE_URL || 'https://your-project.supabase.co';
+const supabaseKey = process.env.SUPABASE_ANON_KEY || 'your-anon-key';
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Coin System: 1 USD = 10,000 Coins
@@ -31,19 +30,19 @@ app.use(express.json());
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'healthy', 
-        service: 'GNEXEN Backend', 
+        service: 'GNEXEN Backend',
         timestamp: new Date().toISOString() 
     });
 });
 
 // ============================================================
-// 2. REGISTER
+// 2. REGISTER USER
 // ============================================================
 app.post('/api/register', async (req, res) => {
     try {
         const { name, email, password, referral } = req.body;
         
-        // Check if user already exists
+        // Check if user exists
         const { data: existingUser } = await supabase
             .from('users')
             .select('email')
@@ -62,10 +61,7 @@ app.post('/api/register', async (req, res) => {
             email: email,
             password: password,
             options: { 
-                data: { 
-                    name: name,
-                    coins: 0
-                } 
+                data: { name: name }
             }
         });
         
@@ -74,7 +70,7 @@ app.post('/api/register', async (req, res) => {
         const user = data.user;
         const refCode = 'GNX' + Math.random().toString(36).substring(2, 8).toUpperCase();
         
-        // Save user to database with coins
+        // Save user to database
         await supabase.from('users').insert({
             uid: user.id,
             name: name,
@@ -88,18 +84,6 @@ app.post('/api/register', async (req, res) => {
             referred_by: referral || null,
             referral_earnings: 0,
             status: 'active',
-            created_at: new Date().toISOString()
-        });
-
-        // Create welcome transaction
-        await supabase.from('transactions').insert({
-            user_id: user.id,
-            type: 'welcome_bonus',
-            amount: 0,
-            coins: 0,
-            currency: 'USDT',
-            description: 'Welcome to GNEXEN REWARD!',
-            status: 'completed',
             created_at: new Date().toISOString()
         });
 
@@ -124,7 +108,7 @@ app.post('/api/register', async (req, res) => {
 });
 
 // ============================================================
-// 3. LOGIN
+// 3. LOGIN USER
 // ============================================================
 app.post('/api/login', async (req, res) => {
     try {
@@ -140,7 +124,7 @@ app.post('/api/login', async (req, res) => {
         const { data: userProfile } = await supabase
             .from('users')
             .select('*')
-            .eq('email', email)
+            .eq('uid', data.user.id)
             .single();
             
         if (!userProfile) {
@@ -185,10 +169,7 @@ app.get('/api/user/:uid', async (req, res) => {
             });
         }
         
-        res.json({ 
-            success: true, 
-            user: user 
-        });
+        res.json({ success: true, user });
         
     } catch (error) {
         res.status(400).json({ 
@@ -199,7 +180,7 @@ app.get('/api/user/:uid', async (req, res) => {
 });
 
 // ============================================================
-// 5. UPDATE USER
+// 5. UPDATE USER PROFILE
 // ============================================================
 app.put('/api/user/:uid', async (req, res) => {
     try {
@@ -208,16 +189,13 @@ app.put('/api/user/:uid', async (req, res) => {
         
         const { data, error } = await supabase
             .from('users')
-            .update({ name: name })
+            .update({ name: name, updated_at: new Date().toISOString() })
             .eq('uid', uid)
             .select();
             
         if (error) throw error;
         
-        res.json({ 
-            success: true, 
-            user: data[0] 
-        });
+        res.json({ success: true, user: data[0] });
         
     } catch (error) {
         res.status(400).json({ 
@@ -228,13 +206,135 @@ app.put('/api/user/:uid', async (req, res) => {
 });
 
 // ============================================================
-// 6. CREATE WITHDRAWAL
+// 6. GET ALL TASKS (User Panel)
+// ============================================================
+app.get('/api/tasks', async (req, res) => {
+    try {
+        const { data: tasks, error } = await supabase
+            .from('tasks')
+            .select('*')
+            .eq('status', 'active')
+            .order('created_at', { ascending: false });
+            
+        if (error) throw error;
+        
+        res.json({ success: true, tasks });
+        
+    } catch (error) {
+        res.status(400).json({ 
+            success: false, 
+            error: error.message 
+        });
+    }
+});
+
+// ============================================================
+// 7. COMPLETE TASK
+// ============================================================
+app.post('/api/complete-task', async (req, res) => {
+    try {
+        const { userId, taskId, reward } = req.body;
+        
+        if (!userId || !taskId) {
+            return res.status(400).json({
+                success: false,
+                error: 'User ID and Task ID required'
+            });
+        }
+        
+        // Get user
+        const { data: user, error: userError } = await supabase
+            .from('users')
+            .select('coins, total_earned, completed_tasks')
+            .eq('uid', userId)
+            .single();
+            
+        if (userError || !user) {
+            return res.status(404).json({
+                success: false,
+                error: 'User not found'
+            });
+        }
+        
+        const coinsToAdd = Math.round(reward * USD_TO_COINS);
+        
+        // Update user
+        await supabase
+            .from('users')
+            .update({
+                coins: (user.coins || 0) + coinsToAdd,
+                total_earned: (user.total_earned || 0) + reward,
+                completed_tasks: (user.completed_tasks || 0) + 1
+            })
+            .eq('uid', userId);
+        
+        // Create transaction
+        await supabase.from('transactions').insert({
+            user_id: userId,
+            type: 'task_reward',
+            amount: reward,
+            coins: coinsToAdd,
+            currency: 'USDT',
+            description: `Task completed: ${taskId}`,
+            status: 'completed',
+            reference_id: taskId,
+            created_at: new Date().toISOString()
+        });
+        
+        // Get updated user data
+        const { data: updatedUser } = await supabase
+            .from('users')
+            .select('*')
+            .eq('uid', userId)
+            .single();
+        
+        res.json({
+            success: true,
+            message: 'Task completed!',
+            coins: coinsToAdd,
+            newBalance: updatedUser?.coins || 0,
+            user: updatedUser
+        });
+        
+    } catch (error) {
+        console.error('Complete task error:', error);
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// ============================================================
+// 8. GET PTC ADS
+// ============================================================
+app.get('/api/ptc-ads', async (req, res) => {
+    try {
+        const { data: ptcAds, error } = await supabase
+            .from('ptc_ads')
+            .select('*')
+            .eq('status', 'active');
+            
+        if (error) throw error;
+        
+        res.json({ success: true, ptcAds });
+        
+    } catch (error) {
+        res.status(400).json({ 
+            success: false, 
+            error: error.message 
+        });
+    }
+});
+
+// ============================================================
+// 9. CREATE WITHDRAWAL REQUEST
 // ============================================================
 app.post('/api/withdraw', async (req, res) => {
     try {
         const { userId, method, account, amount, giftValue } = req.body;
         
-        // Check user and coins
+        // Check user
         const { data: user, error: userError } = await supabase
             .from('users')
             .select('coins, balance')
@@ -283,28 +383,11 @@ app.post('/api/withdraw', async (req, res) => {
                 total_withdrawn: (user.total_withdrawn || 0) + amount
             })
             .eq('uid', userId);
-            
-        // Create transaction
-        await supabase.from('transactions').insert({
-            user_id: userId,
-            type: 'withdrawal_request',
-            amount: amount,
-            coins: requiredCoins,
-            currency: method === 'faucetpay' ? 'USDT' : 'INR',
-            description: `Withdrawal request via ${method}`,
-            status: 'pending',
-            reference_id: withdrawal.id,
-            created_at: new Date().toISOString()
-        });
-        
-        // If FaucetPay, process automatically
-        if (method === 'faucetpay') {
-            processFaucetPayment(withdrawal.id, userId, account, amount);
-        }
         
         res.json({ 
             success: true, 
-            withdrawal: withdrawal 
+            withdrawal: withdrawal,
+            message: 'Withdrawal request submitted successfully'
         });
         
     } catch (error) {
@@ -317,156 +400,7 @@ app.post('/api/withdraw', async (req, res) => {
 });
 
 // ============================================================
-// 7. PROCESS FAUCETPAY PAYMENT (AUTOMATIC)
-// ============================================================
-async function processFaucetPayment(withdrawalId, userId, account, amount) {
-    console.log(`💰 Processing FaucetPay payment #${withdrawalId}`);
-    
-    try {
-        // Get FaucetPay settings
-        const { data: settings } = await supabase
-            .from('settings')
-            .select('value')
-            .eq('key', 'faucetpay')
-            .single();
-            
-        const config = settings?.value || {};
-        
-        if (!config.api_key) {
-            console.error('❌ FaucetPay API Key not configured');
-            await supabase
-                .from('withdrawals')
-                .update({
-                    status: 'failed',
-                    error: 'FaucetPay API Key not configured'
-                })
-                .eq('id', withdrawalId);
-            return;
-        }
-        
-        // Update status to processing
-        await supabase
-            .from('withdrawals')
-            .update({
-                status: 'processing',
-                processed_at: new Date().toISOString()
-            })
-            .eq('id', withdrawalId);
-            
-        // Call FaucetPay API
-        const response = await axios.post('https://faucetpay.io/api/v1/send', null, {
-            params: {
-                api_key: config.api_key,
-                to: account,
-                amount: amount,
-                currency: config.currency || 'USDT',
-                referrer: config.username || '',
-                memo: `GNEXEN Withdrawal #${withdrawalId}`
-            },
-            timeout: 30000
-        });
-        
-        console.log('📥 FaucetPay Response:', response.data);
-        
-        if (response.data && response.data.status === 'success') {
-            // Payment successful
-            await supabase
-                .from('withdrawals')
-                .update({
-                    status: 'paid',
-                    transaction_id: response.data.txn_id || 'fp_' + Date.now(),
-                    paid_at: new Date().toISOString()
-                })
-                .eq('id', withdrawalId);
-                
-            // Update transaction
-            await supabase
-                .from('transactions')
-                .update({
-                    status: 'completed',
-                    transaction_id: response.data.txn_id || 'fp_' + Date.now()
-                })
-                .eq('reference_id', withdrawalId);
-                
-            console.log(`✅ Payment successful #${withdrawalId}`);
-            
-        } else {
-            // Payment failed
-            const errorMsg = response.data?.message || 'Unknown error';
-            console.error('❌ FaucetPay failed:', errorMsg);
-            
-            await supabase
-                .from('withdrawals')
-                .update({
-                    status: 'failed',
-                    error: errorMsg
-                })
-                .eq('id', withdrawalId);
-                
-            // Refund coins to user
-            const wDoc = await supabase
-                .from('withdrawals')
-                .select('coins_deducted, user_id')
-                .eq('id', withdrawalId)
-                .single();
-                
-            if (wDoc.data) {
-                const { data: user } = await supabase
-                    .from('users')
-                    .select('coins')
-                    .eq('uid', wDoc.data.user_id)
-                    .single();
-                    
-                if (user) {
-                    await supabase
-                        .from('users')
-                        .update({
-                            coins: (user.coins || 0) + (wDoc.data.coins_deducted || 0)
-                        })
-                        .eq('uid', wDoc.data.user_id);
-                }
-            }
-        }
-        
-    } catch (error) {
-        console.error('❌ Payment error:', error);
-        
-        await supabase
-            .from('withdrawals')
-            .update({
-                status: 'failed',
-                error: error.message
-            })
-            .eq('id', withdrawalId);
-            
-        // Refund coins
-        const wDoc = await supabase
-            .from('withdrawals')
-            .select('coins_deducted, user_id')
-            .eq('id', withdrawalId)
-            .single();
-            
-        if (wDoc.data) {
-            const { data: user } = await supabase
-                .from('users')
-                .select('coins')
-                .eq('uid', wDoc.data.user_id)
-                .single();
-                
-            if (user) {
-                await supabase
-                    .from('users')
-                    .update({
-                        coins: (user.coins || 0) + (wDoc.data.coins_deducted || 0)
-                    })
-                    .eq('uid', wDoc.data.user_id);
-            }
-        }
-    }
-}
-
-// ============================================================
-// 8. GET WITHDRAWALS
+// 10. GET USER WITHDRAWALS
 // ============================================================
 app.get('/api/withdrawals/:userId', async (req, res) => {
     try {
@@ -480,10 +414,7 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
             
         if (error) throw error;
         
-        res.json({ 
-            success: true, 
-            withdrawals: withdrawals 
-        });
+        res.json({ success: true, withdrawals });
         
     } catch (error) {
         res.status(400).json({ 
@@ -494,311 +425,56 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
 });
 
 // ============================================================
-// 9. GET PTC ADS
+// 11. GET USER TRANSACTIONS
 // ============================================================
-app.get('/api/ptc-ads', async (req, res) => {
-    try {
-        const { data: ptcAds, error } = await supabase
-            .from('ptc_ads')
-            .select('*')
-            .eq('status', 'active');
-            
-        if (error) throw error;
-        
-        res.json({ 
-            success: true, 
-            ptcAds: ptcAds 
-        });
-        
-    } catch (error) {
-        res.status(400).json({ 
-            success: false, 
-            error: error.message 
-        });
-    }
-});
-
-// ============================================================
-// 10. GET TASKS
-// ============================================================
-app.get('/api/tasks', async (req, res) => {
-    try {
-        const { data: tasks, error } = await supabase
-            .from('tasks')
-            .select('*')
-            .eq('status', 'active');
-            
-        if (error) throw error;
-        
-        res.json({ 
-            success: true, 
-            tasks: tasks 
-        });
-        
-    } catch (error) {
-        res.status(400).json({ 
-            success: false, 
-            error: error.message 
-        });
-    }
-});
-
-// ============================================================
-// 11. COMPLETE TASK (AUTO VERIFY)
-// ============================================================
-app.post('/api/complete-task', async (req, res) => {
-    try {
-        const { userId, taskId, reward } = req.body;
-        
-        console.log('📝 Complete Task Request:', { userId, taskId, reward });
-        
-        // Validate
-        if (!userId) {
-            return res.status(400).json({
-                success: false,
-                error: 'User ID required'
-            });
-        }
-        
-        if (!taskId) {
-            return res.status(400).json({
-                success: false,
-                error: 'Task ID required'
-            });
-        }
-        
-        // Get user
-        const { data: user, error: userError } = await supabase
-            .from('users')
-            .select('coins, total_earned, completed_tasks')
-            .eq('uid', userId)
-            .single();
-            
-        if (userError || !user) {
-            console.log('❌ User not found:', userId);
-            return res.status(404).json({
-                success: false,
-                error: 'User not found'
-            });
-        }
-        
-        const coinsToAdd = Math.round(reward * USD_TO_COINS);
-        
-        // Update user with coins
-        const { error: updateError } = await supabase
-            .from('users')
-            .update({
-                coins: (user.coins || 0) + coinsToAdd,
-                total_earned: (user.total_earned || 0) + reward,
-                completed_tasks: (user.completed_tasks || 0) + 1
-            })
-            .eq('uid', userId);
-            
-        if (updateError) {
-            console.log('❌ Update error:', updateError);
-            return res.status(400).json({
-                success: false,
-                error: updateError.message
-            });
-        }
-        
-        // Create transaction record with coins
-        await supabase.from('transactions').insert({
-            user_id: userId,
-            type: 'task_reward',
-            amount: reward,
-            coins: coinsToAdd,
-            currency: 'USDT',
-            description: `Task completed: ${taskId}`,
-            status: 'completed',
-            reference_id: taskId,
-            created_at: new Date().toISOString()
-        });
-        
-        // Get updated user data
-        const { data: updatedUser } = await supabase
-            .from('users')
-            .select('*')
-            .eq('uid', userId)
-            .single();
-        
-        console.log(`✅ Task completed! User ${userId} earned ${coinsToAdd} coins`);
-        
-        res.json({
-            success: true,
-            message: 'Task completed!',
-            coins: coinsToAdd,
-            newBalance: updatedUser?.coins || 0
-        });
-        
-    } catch (error) {
-        console.error('❌ Complete task error:', error);
-        res.status(400).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// ============================================================
-// 12. FAUCET CLAIM (1 Coin Every 5 Minutes)
-// ============================================================
-app.post('/api/faucet-claim', async (req, res) => {
-    try {
-        const { userId, coins } = req.body;
-        
-        if (!userId) {
-            return res.status(400).json({
-                success: false,
-                error: 'User ID required'
-            });
-        }
-        
-        // Check last claim (5 minutes cooldown)
-        const { data: lastClaim, error: lastError } = await supabase
-            .from('faucet_history')
-            .select('created_at')
-            .eq('user_id', userId)
-            .order('created_at', { ascending: false })
-            .limit(1);
-            
-        if (lastClaim && lastClaim.length > 0) {
-            const lastTime = new Date(lastClaim[0].created_at).getTime();
-            const now = Date.now();
-            const diff = (now - lastTime) / 1000;
-            
-            if (diff < 300) {
-                return res.status(400).json({
-                    success: false,
-                    error: `Please wait ${Math.ceil(300 - diff)} seconds`,
-                    remaining: Math.ceil(300 - diff)
-                });
-            }
-        }
-        
-        // Get user
-        const { data: user, error: userError } = await supabase
-            .from('users')
-            .select('coins, total_earned')
-            .eq('uid', userId)
-            .single();
-            
-        if (userError || !user) {
-            return res.status(404).json({
-                success: false,
-                error: 'User not found'
-            });
-        }
-        
-        const coinAmount = coins || 1;
-        
-        // Add coins
-        await supabase
-            .from('users')
-            .update({
-                coins: (user.coins || 0) + coinAmount,
-                total_earned: (user.total_earned || 0) + (coinAmount / USD_TO_COINS)
-            })
-            .eq('uid', userId);
-            
-        // Record faucet history
-        await supabase
-            .from('faucet_history')
-            .insert({
-                user_id: userId,
-                coins: coinAmount,
-                status: 'completed',
-                created_at: new Date().toISOString()
-            });
-            
-        // Create transaction
-        await supabase.from('transactions').insert({
-            user_id: userId,
-            type: 'faucet_reward',
-            amount: coinAmount / USD_TO_COINS,
-            coins: coinAmount,
-            currency: 'USDT',
-            description: 'Faucet claim: 1 coin',
-            status: 'completed',
-            created_at: new Date().toISOString()
-        });
-            
-        res.json({
-            success: true,
-            message: 'Faucet claimed successfully',
-            coins: coinAmount
-        });
-        
-    } catch (error) {
-        console.error('Faucet claim error:', error);
-        res.status(400).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// ============================================================
-// 13. GET FAUCET HISTORY
-// ============================================================
-app.get('/api/faucet-history/:userId', async (req, res) => {
+app.get('/api/transactions/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
         
-        const { data: history, error } = await supabase
-            .from('faucet_history')
+        const { data: transactions, error } = await supabase
+            .from('transactions')
             .select('*')
             .eq('user_id', userId)
-            .order('created_at', { ascending: false })
-            .limit(50);
+            .order('created_at', { ascending: false });
             
         if (error) throw error;
         
-        res.json({
-            success: true,
-            history: history || []
-        });
+        res.json({ success: true, transactions });
         
     } catch (error) {
-        res.status(400).json({
-            success: false,
-            error: error.message
+        res.status(400).json({ 
+            success: false, 
+            error: error.message 
         });
     }
 });
 
 // ============================================================
-// 14. CHECK FAUCET STATUS (For Timer)
+// 12. GET REFERRAL STATS
 // ============================================================
-app.get('/api/faucet-status/:userId', async (req, res) => {
+app.get('/api/referral/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
         
-        const { data: lastClaim } = await supabase
-            .from('faucet_history')
-            .select('created_at')
-            .eq('user_id', userId)
-            .order('created_at', { ascending: false })
-            .limit(1);
+        const { data: referrals, error } = await supabase
+            .from('users')
+            .select('uid, name, email, created_at')
+            .eq('referred_by', userId);
             
-        let remaining = 0;
-        let canClaim = true;
+        if (error) throw error;
         
-        if (lastClaim && lastClaim.length > 0) {
-            const lastTime = new Date(lastClaim[0].created_at).getTime();
-            const now = Date.now();
-            const diff = (now - lastTime) / 1000;
+        const { data: user } = await supabase
+            .from('users')
+            .select('referral_code, referral_earnings')
+            .eq('uid', userId)
+            .single();
             
-            if (diff < 300) {
-                canClaim = false;
-                remaining = Math.ceil(300 - diff);
-            }
-        }
-        
         res.json({
             success: true,
-            canClaim: canClaim,
-            remaining: remaining
+            referralCode: user?.referral_code,
+            referralEarnings: user?.referral_earnings || 0,
+            totalReferrals: referrals?.length || 0,
+            referrals: referrals || []
         });
         
     } catch (error) {
@@ -810,7 +486,30 @@ app.get('/api/faucet-status/:userId', async (req, res) => {
 });
 
 // ============================================================
-// 15. ADMIN - GET ALL USERS
+// 13. GET LEADERBOARD
+// ============================================================
+app.get('/api/leaderboard', async (req, res) => {
+    try {
+        const { data: users, error } = await supabase
+            .from('users')
+            .select('name, coins, total_earned, completed_tasks')
+            .order('coins', { ascending: false })
+            .limit(10);
+            
+        if (error) throw error;
+        
+        res.json({ success: true, leaderboard: users });
+        
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// ============================================================
+// 14. ADMIN - GET ALL USERS
 // ============================================================
 app.get('/api/admin/users', async (req, res) => {
     try {
@@ -821,10 +520,7 @@ app.get('/api/admin/users', async (req, res) => {
             
         if (error) throw error;
         
-        res.json({
-            success: true,
-            users: users
-        });
+        res.json({ success: true, users });
         
     } catch (error) {
         res.status(400).json({
@@ -835,7 +531,7 @@ app.get('/api/admin/users', async (req, res) => {
 });
 
 // ============================================================
-// 16. ADMIN - GET ALL WITHDRAWALS
+// 15. ADMIN - GET ALL WITHDRAWALS
 // ============================================================
 app.get('/api/admin/withdrawals', async (req, res) => {
     try {
@@ -846,10 +542,7 @@ app.get('/api/admin/withdrawals', async (req, res) => {
             
         if (error) throw error;
         
-        res.json({
-            success: true,
-            withdrawals: withdrawals
-        });
+        res.json({ success: true, withdrawals });
         
     } catch (error) {
         res.status(400).json({
@@ -860,7 +553,7 @@ app.get('/api/admin/withdrawals', async (req, res) => {
 });
 
 // ============================================================
-// 17. ADMIN - UPDATE WITHDRAWAL STATUS
+// 16. ADMIN - UPDATE WITHDRAWAL STATUS
 // ============================================================
 app.put('/api/admin/withdrawal/:id', async (req, res) => {
     try {
@@ -914,10 +607,7 @@ app.put('/api/admin/withdrawal/:id', async (req, res) => {
             }
         }
         
-        res.json({
-            success: true,
-            withdrawal: data[0]
-        });
+        res.json({ success: true, withdrawal: data[0] });
         
     } catch (error) {
         res.status(400).json({
@@ -928,158 +618,7 @@ app.put('/api/admin/withdrawal/:id', async (req, res) => {
 });
 
 // ============================================================
-// 18. ADMIN - GET ALL PTC ADS
-// ============================================================
-app.get('/api/admin/ptc-ads', async (req, res) => {
-    try {
-        const { data: ptcAds, error } = await supabase
-            .from('ptc_ads')
-            .select('*')
-            .order('created_at', { ascending: false });
-            
-        if (error) throw error;
-        
-        res.json({
-            success: true,
-            ptcAds: ptcAds
-        });
-        
-    } catch (error) {
-        res.status(400).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// ============================================================
-// 19. ADMIN - CREATE PTC AD
-// ============================================================
-app.post('/api/admin/ptc-ad', async (req, res) => {
-    try {
-        const { title, description, destinationUrl, viewDuration, reward, status } = req.body;
-        
-        const { data, error } = await supabase
-            .from('ptc_ads')
-            .insert({
-                title: title,
-                description: description || '',
-                destination_url: destinationUrl,
-                view_duration: viewDuration || 5,
-                reward: reward,
-                status: status || 'active',
-                total_clicks: 0,
-                created_at: new Date().toISOString()
-            })
-            .select()
-            .single();
-            
-        if (error) throw error;
-        
-        res.json({
-            success: true,
-            ptcAd: data
-        });
-        
-    } catch (error) {
-        res.status(400).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// ============================================================
-// 20. ADMIN - UPDATE PTC AD
-// ============================================================
-app.put('/api/admin/ptc-ad/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { title, description, destinationUrl, viewDuration, reward, status } = req.body;
-        
-        const { data, error } = await supabase
-            .from('ptc_ads')
-            .update({
-                title: title,
-                description: description || '',
-                destination_url: destinationUrl,
-                view_duration: viewDuration || 5,
-                reward: reward,
-                status: status,
-                updated_at: new Date().toISOString()
-            })
-            .eq('id', id)
-            .select();
-            
-        if (error) throw error;
-        
-        res.json({
-            success: true,
-            ptcAd: data[0]
-        });
-        
-    } catch (error) {
-        res.status(400).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// ============================================================
-// 21. ADMIN - DELETE PTC AD
-// ============================================================
-app.delete('/api/admin/ptc-ad/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        
-        const { error } = await supabase
-            .from('ptc_ads')
-            .delete()
-            .eq('id', id);
-            
-        if (error) throw error;
-        
-        res.json({
-            success: true,
-            message: 'PTC Ad deleted successfully'
-        });
-        
-    } catch (error) {
-        res.status(400).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// ============================================================
-// 22. ADMIN - GET ALL TASKS
-// ============================================================
-app.get('/api/admin/tasks', async (req, res) => {
-    try {
-        const { data: tasks, error } = await supabase
-            .from('tasks')
-            .select('*')
-            .order('created_at', { ascending: false });
-            
-        if (error) throw error;
-        
-        res.json({
-            success: true,
-            tasks: tasks
-        });
-        
-    } catch (error) {
-        res.status(400).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// ============================================================
-// 23. ADMIN - CREATE TASK
+// 17. ADMIN - CREATE TASK
 // ============================================================
 app.post('/api/admin/task', async (req, res) => {
     try {
@@ -1102,10 +641,7 @@ app.post('/api/admin/task', async (req, res) => {
             
         if (error) throw error;
         
-        res.json({
-            success: true,
-            task: data
-        });
+        res.json({ success: true, task: data });
         
     } catch (error) {
         res.status(400).json({
@@ -1116,7 +652,7 @@ app.post('/api/admin/task', async (req, res) => {
 });
 
 // ============================================================
-// 24. ADMIN - UPDATE TASK
+// 18. ADMIN - UPDATE TASK
 // ============================================================
 app.put('/api/admin/task/:id', async (req, res) => {
     try {
@@ -1140,10 +676,7 @@ app.put('/api/admin/task/:id', async (req, res) => {
             
         if (error) throw error;
         
-        res.json({
-            success: true,
-            task: data[0]
-        });
+        res.json({ success: true, task: data[0] });
         
     } catch (error) {
         res.status(400).json({
@@ -1154,7 +687,7 @@ app.put('/api/admin/task/:id', async (req, res) => {
 });
 
 // ============================================================
-// 25. ADMIN - DELETE TASK
+// 19. ADMIN - DELETE TASK
 // ============================================================
 app.delete('/api/admin/task/:id', async (req, res) => {
     try {
@@ -1167,10 +700,185 @@ app.delete('/api/admin/task/:id', async (req, res) => {
             
         if (error) throw error;
         
-        res.json({
-            success: true,
-            message: 'Task deleted successfully'
+        res.json({ success: true, message: 'Task deleted successfully' });
+        
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
         });
+    }
+});
+
+// ============================================================
+// 20. ADMIN - GET ALL TASKS
+// ============================================================
+app.get('/api/admin/tasks', async (req, res) => {
+    try {
+        const { data: tasks, error } = await supabase
+            .from('tasks')
+            .select('*')
+            .order('created_at', { ascending: false });
+            
+        if (error) throw error;
+        
+        res.json({ success: true, tasks });
+        
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// ============================================================
+// 21. ADMIN - CREATE PTC AD
+// ============================================================
+app.post('/api/admin/ptc-ad', async (req, res) => {
+    try {
+        const { title, description, destinationUrl, viewDuration, reward, status } = req.body;
+        
+        const { data, error } = await supabase
+            .from('ptc_ads')
+            .insert({
+                title: title,
+                description: description || '',
+                destination_url: destinationUrl,
+                view_duration: viewDuration || 5,
+                reward: reward,
+                status: status || 'active',
+                total_clicks: 0,
+                created_at: new Date().toISOString()
+            })
+            .select()
+            .single();
+            
+        if (error) throw error;
+        
+        res.json({ success: true, ptcAd: data });
+        
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// ============================================================
+// 22. ADMIN - GET ALL PTC ADS
+// ============================================================
+app.get('/api/admin/ptc-ads', async (req, res) => {
+    try {
+        const { data: ptcAds, error } = await supabase
+            .from('ptc_ads')
+            .select('*')
+            .order('created_at', { ascending: false });
+            
+        if (error) throw error;
+        
+        res.json({ success: true, ptcAds });
+        
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// ============================================================
+// 23. ADMIN - UPDATE PTC AD
+// ============================================================
+app.put('/api/admin/ptc-ad/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { title, description, destinationUrl, viewDuration, reward, status } = req.body;
+        
+        const { data, error } = await supabase
+            .from('ptc_ads')
+            .update({
+                title: title,
+                description: description || '',
+                destination_url: destinationUrl,
+                view_duration: viewDuration || 5,
+                reward: reward,
+                status: status,
+                updated_at: new Date().toISOString()
+            })
+            .eq('id', id)
+            .select();
+            
+        if (error) throw error;
+        
+        res.json({ success: true, ptcAd: data[0] });
+        
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// ============================================================
+// 24. ADMIN - DELETE PTC AD
+// ============================================================
+app.delete('/api/admin/ptc-ad/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        const { error } = await supabase
+            .from('ptc_ads')
+            .delete()
+            .eq('id', id);
+            
+        if (error) throw error;
+        
+        res.json({ success: true, message: 'PTC Ad deleted successfully' });
+        
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// ============================================================
+// 25. ADMIN - UPDATE SETTINGS
+// ============================================================
+app.put('/api/admin/settings/:key', async (req, res) => {
+    try {
+        const { key } = req.params;
+        const { value } = req.body;
+        
+        const { data, error } = await supabase
+            .from('settings')
+            .update({
+                value: value,
+                updated_at: new Date().toISOString()
+            })
+            .eq('key', key)
+            .select();
+            
+        if (error) {
+            const { data: insertData, error: insertError } = await supabase
+                .from('settings')
+                .insert({
+                    key: key,
+                    value: value,
+                    updated_at: new Date().toISOString()
+                })
+                .select();
+                
+            if (insertError) throw insertError;
+            
+            return res.json({ success: true, settings: insertData[0] });
+        }
+        
+        res.json({ success: true, settings: data[0] });
         
     } catch (error) {
         res.status(400).json({
@@ -1195,10 +903,7 @@ app.get('/api/settings/:key', async (req, res) => {
             
         if (error) throw error;
         
-        res.json({
-            success: true,
-            settings: settings?.value || {}
-        });
+        res.json({ success: true, settings: settings?.value || {} });
         
     } catch (error) {
         res.status(400).json({
@@ -1209,70 +914,17 @@ app.get('/api/settings/:key', async (req, res) => {
 });
 
 // ============================================================
-// 27. ADMIN - UPDATE SETTINGS
-// ============================================================
-app.put('/api/admin/settings/:key', async (req, res) => {
-    try {
-        const { key } = req.params;
-        const { value } = req.body;
-        
-        const { data, error } = await supabase
-            .from('settings')
-            .update({
-                value: value,
-                updated_at: new Date().toISOString()
-            })
-            .eq('key', key)
-            .select();
-            
-        if (error) {
-            // If not exists, insert
-            const { data: insertData, error: insertError } = await supabase
-                .from('settings')
-                .insert({
-                    key: key,
-                    value: value,
-                    updated_at: new Date().toISOString()
-                })
-                .select();
-                
-            if (insertError) throw insertError;
-            
-            return res.json({
-                success: true,
-                settings: insertData[0]
-            });
-        }
-        
-        res.json({
-            success: true,
-            settings: data[0]
-        });
-        
-    } catch (error) {
-        res.status(400).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// ============================================================
-// 28. START SERVER
+// START SERVER
 // ============================================================
 app.listen(PORT, () => {
     console.log(`🚀 GNEXEN REWARD Backend`);
     console.log(`📡 Server running on port ${PORT}`);
-    console.log(`🔑 Supabase connected: ${supabaseUrl}`);
+    console.log(`🔑 Supabase connected`);
     console.log(`🪙 Coin System: 1 USD = ${USD_TO_COINS} Coins`);
-    console.log(`💰 Faucet: 1 Coin every 5 minutes`);
-    console.log(`⚡ FaucetPay: AUTO`);
     console.log(`✅ Server ready!`);
 });
 
-// ============================================================
-// ERROR HANDLING
-// ============================================================
+// Error Handling
 process.on('uncaughtException', (err) => {
     console.error('❌ Uncaught Exception:', err);
 });
