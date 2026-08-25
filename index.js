@@ -608,7 +608,29 @@ app.get('/api/faucetpay-balance', async (req, res) => {
 // BITCOTASKS OFFERWALL POSTBACK HANDLER
 // ============================================================
 
-// 13. BITCOTASKS POSTBACK
+// 13. GET - Test endpoint for BitcoTasks Webhook
+app.get('/api/bitcotasks-webhook', (req, res) => {
+    res.json({
+        success: true,
+        message: 'BitcoTasks Webhook is active and ready to receive POST requests',
+        method: 'POST',
+        endpoint: '/api/bitcotasks-webhook',
+        usage: 'Send POST request with user_id, amount, transaction_id, status',
+        example: {
+            method: 'POST',
+            url: 'https://gnexen-backend-new.onrender.com/api/bitcotasks-webhook',
+            body: {
+                user_id: 'user-uid-here',
+                amount: '0.50',
+                transaction_id: 'btc_12345',
+                status: 'success'
+            }
+        },
+        timestamp: new Date().toISOString()
+    });
+});
+
+// 14. POST - BitcoTasks Webhook Handler
 app.post('/api/bitcotasks-webhook', async (req, res) => {
     try {
         const { user_id, amount, transaction_id, status, signature } = req.body;
@@ -616,8 +638,8 @@ app.post('/api/bitcotasks-webhook', async (req, res) => {
         console.log('📥 BitcoTasks Postback Received:', { user_id, amount, transaction_id, status });
         
         // Verify signature/secret (Optional but recommended)
-        // const secret = process.env.BITCOTASKS_SECRET;
-        // if (signature !== secret) {
+        const secret = process.env.BITCOTASKS_SECRET;
+        // if (secret && signature !== secret) {
         //     return res.status(401).json({ success: false, error: 'Invalid signature' });
         // }
         
@@ -697,7 +719,7 @@ app.post('/api/bitcotasks-webhook', async (req, res) => {
 // ADMIN APIs
 // ============================================================
 
-// 14. ADMIN - GET ALL USERS
+// 15. ADMIN - GET ALL USERS
 app.get('/api/admin/users', async (req, res) => {
     try {
         const { data: users, error } = await supabase
@@ -717,7 +739,7 @@ app.get('/api/admin/users', async (req, res) => {
     }
 });
 
-// 15. ADMIN - GET ALL WITHDRAWALS
+// 16. ADMIN - GET ALL WITHDRAWALS
 app.get('/api/admin/withdrawals', async (req, res) => {
     try {
         const { data: withdrawals, error } = await supabase
@@ -737,7 +759,7 @@ app.get('/api/admin/withdrawals', async (req, res) => {
     }
 });
 
-// 16. ADMIN - UPDATE WITHDRAWAL STATUS
+// 17. ADMIN - UPDATE WITHDRAWAL STATUS
 app.put('/api/admin/withdrawal/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -800,7 +822,7 @@ app.put('/api/admin/withdrawal/:id', async (req, res) => {
     }
 });
 
-// 17. ADMIN - UPDATE SETTINGS
+// 18. ADMIN - UPDATE SETTINGS
 app.put('/api/admin/settings/:key', async (req, res) => {
     try {
         const { key } = req.params;
@@ -840,7 +862,7 @@ app.put('/api/admin/settings/:key', async (req, res) => {
     }
 });
 
-// 18. ADMIN - GET SETTINGS
+// 19. ADMIN - GET SETTINGS
 app.get('/api/settings/:key', async (req, res) => {
     try {
         const { key } = req.params;
@@ -863,7 +885,7 @@ app.get('/api/settings/:key', async (req, res) => {
     }
 });
 
-// 19. ADMIN - CREATE TASK
+// 20. ADMIN - CREATE TASK
 app.post('/api/admin/task', async (req, res) => {
     try {
         const { title, description, category, taskUrl, instructions, reward, status } = req.body;
@@ -895,7 +917,7 @@ app.post('/api/admin/task', async (req, res) => {
     }
 });
 
-// 20. ADMIN - UPDATE TASK
+// 21. ADMIN - UPDATE TASK
 app.put('/api/admin/task/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -928,7 +950,7 @@ app.put('/api/admin/task/:id', async (req, res) => {
     }
 });
 
-// 21. ADMIN - DELETE TASK
+// 22. ADMIN - DELETE TASK
 app.delete('/api/admin/task/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -950,7 +972,7 @@ app.delete('/api/admin/task/:id', async (req, res) => {
     }
 });
 
-// 22. ADMIN - GET ALL TASKS
+// 23. ADMIN - GET ALL TASKS
 app.get('/api/admin/tasks', async (req, res) => {
     try {
         const { data: tasks, error } = await supabase
@@ -970,7 +992,7 @@ app.get('/api/admin/tasks', async (req, res) => {
     }
 });
 
-// 23. ADMIN - CREATE PTC AD
+// 24. ADMIN - CREATE PTC AD
 app.post('/api/admin/ptc-ad', async (req, res) => {
     try {
         const { title, description, destinationUrl, viewDuration, reward, status } = req.body;
@@ -1002,7 +1024,7 @@ app.post('/api/admin/ptc-ad', async (req, res) => {
     }
 });
 
-// 24. ADMIN - GET ALL PTC ADS
+// 25. ADMIN - GET ALL PTC ADS
 app.get('/api/admin/ptc-ads', async (req, res) => {
     try {
         const { data: ptcAds, error } = await supabase
@@ -1022,7 +1044,7 @@ app.get('/api/admin/ptc-ads', async (req, res) => {
     }
 });
 
-// 25. ADMIN - UPDATE PTC AD
+// 26. ADMIN - UPDATE PTC AD
 app.put('/api/admin/ptc-ad/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -1054,7 +1076,7 @@ app.put('/api/admin/ptc-ad/:id', async (req, res) => {
     }
 });
 
-// 26. ADMIN - DELETE PTC AD
+// 27. ADMIN - DELETE PTC AD
 app.delete('/api/admin/ptc-ad/:id', async (req, res) => {
     try {
         const { id } = req.params;
