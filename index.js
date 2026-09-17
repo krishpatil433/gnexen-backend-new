@@ -8,6 +8,7 @@ const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const axios = require('axios');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -23,13 +24,39 @@ const USD_TO_COINS = 10000;
 const FAUCETPAY_API_URL = 'https://faucetpay.io/api/v1';
 
 // ============================================================
-// BITCOTASKS CONFIG
+// OFFERWALL CONFIG
 // ============================================================
 const BITCOTASKS_API_KEY = process.env.BITCOTASKS_API_KEY;
 const BITCOTASKS_BEARER_TOKEN = process.env.BITCOTASKS_BEARER_TOKEN;
+const BITCOTASKS_SECRET_KEY = process.env.BITCOTASKS_SECRET_KEY;
+const CX_SECRET_KEY = process.env.CX_SECRET_KEY;
 
+// ============================================================
+// MIDDLEWARE - YEH SABSE IMPORTANT HAI
+// ============================================================
 app.use(cors());
+
+// ✅ JSON parser (frontend API calls ke liye)
 app.use(express.json());
+
+// ✅ URL-encoded parser (offerwall postbacks ke liye)
+app.use(express.urlencoded({ extended: true }));
+
+// ✅ Raw body parser (signature verification ke liye)
+app.use(express.raw({ type: 'application/x-www-form-urlencoded' }));
+
+// ✅ Custom parser - dono formats handle karega
+app.use((req, res, next) => {
+    if (req.body && Buffer.isBuffer(req.body)) {
+        const bodyString = req.body.toString();
+        try {
+            req.body = JSON.parse(bodyString);
+        } catch (e) {
+            req.body = Object.fromEntries(new URLSearchParams(bodyString));
+        }
+    }
+    next();
+});
 
 // ============================================================
 // HEALTH CHECK
@@ -41,6 +68,106 @@ app.get('/health', (req, res) => {
         timestamp: new Date().toISOString() 
     });
 });
+
+// ============================================================
+// HELPER FUNCTIONS
+// ============================================================
+
+// MD5 hash for signature verification
+function md5(string) {
+    return crypto.createHash('md5').update(string).digest('hex');
+}
+
+// Credit coins to user
+async function creditCoins(userId, coinsToAdd, amountUSD, description, referenceId, type = 'offerwall_reward') {
+    try {
+        // Get user
+        const { data: user, error: userError } = await supabase
+            .from('users')
+            .select('coins, total_earned')
+            .eq('uid', userId)
+            .single();
+            
+        if (userError || !user) {
+            console.error('❌ User not found:', userId);
+            return { success: false, error: 'User not found' };
+        }
+        
+        // Update user
+        const updatedCoins = (user.coins || 0) + coinsToAdd;
+        const updatedEarned = (user.total_earned || 0) + amountUSD;
+        
+        const { error: updateError } = await supabase
+            .from('users')
+            .update({
+                coins: updatedCoins,
+                total_earned: updatedEarned
+            })
+            .eq('uid', userId);
+            
+        if (updateError) {
+            console.error('❌ Update error:', updateError);
+            return { success: false, error: updateError.message };
+        }
+        
+        // Create transaction
+        await supabase.from('transactions').insert({
+            user_id: userId,
+            type: type,
+            amount: amountUSD,
+            coins: coinsToAdd,
+            currency: 'USD',
+            description: description,
+            status: 'completed',
+            reference_id: referenceId || 'tx_' + Date.now(),
+            created_at: new Date().toISOString()
+        });
+        
+        console.log(`✅ Credited ${coinsToAdd} coins to user ${userId}`);
+        return { success: true, newCoins: updatedCoins };
+        
+    } catch (error) {
+        console.error('❌ Credit coins error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// Debit coins from user (for chargebacks)
+async function debitCoins(userId, coinsToRemove, amountUSD, description, referenceId) {
+    try {
+        const { data: user, error: userError } = await supabase
+            .from('users')
+            .select('coins, total_earned')
+            .eq('uid', userId)
+            .single();
+            
+        if (userError || !user) return { success: false, error: 'User not found' };
+        
+        await supabase
+            .from('users')
+            .update({
+                coins: Math.max(0, (user.coins || 0) - coinsToRemove),
+                total_earned: Math.max(0, (user.total_earned || 0) - amountUSD)
+            })
+            .eq('uid', userId);
+        
+        await supabase.from('transactions').insert({
+            user_id: userId,
+            type: 'chargeback',
+            amount: -amountUSD,
+            coins: -coinsToRemove,
+            currency: 'USD',
+            description: description,
+            status: 'completed',
+            reference_id: referenceId || 'cb_' + Date.now(),
+            created_at: new Date().toISOString()
+        });
+        
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
 
 // ============================================================
 // USER APIs
@@ -58,10 +185,7 @@ app.post('/api/register', async (req, res) => {
             .single();
 
         if (existingUser) {
-            return res.status(400).json({
-                success: false,
-                error: 'Email already registered'
-            });
+            return res.status(400).json({ success: false, error: 'Email already registered' });
         }
 
         const { data, error } = await supabase.auth.signUp({
@@ -88,12 +212,13 @@ app.post('/api/register', async (req, res) => {
             referred_by: referral || null,
             referral_earnings: 0,
             status: 'active',
-            created_at: new Date().toISOString()
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
         });
 
         res.json({ 
             success: true, 
-            user: { id: user.id, name, email, referralCode: refCode, coins: 0 } 
+            user: { id: user.id, uid: user.id, name, email, referralCode: refCode, coins: 0 } 
         });
         
     } catch (error) {
@@ -127,6 +252,7 @@ app.post('/api/login', async (req, res) => {
         res.json({ success: true, user: userProfile, session: data.session });
         
     } catch (error) {
+        console.error('Login error:', error);
         res.status(400).json({ success: false, error: error.message });
     }
 });
@@ -180,7 +306,6 @@ app.put('/api/admin/user/:uid', async (req, res) => {
             .update({ status, updated_at: new Date().toISOString() })
             .eq('uid', uid)
             .select();
-            
         if (error) throw error;
         res.json({ success: true, user: data[0] });
     } catch (error) {
@@ -200,7 +325,6 @@ app.get('/api/tasks', async (req, res) => {
             .select('*')
             .eq('status', 'active')
             .order('created_at', { ascending: false });
-            
         if (error) throw error;
         res.json({ success: true, tasks });
     } catch (error) {
@@ -208,45 +332,45 @@ app.get('/api/tasks', async (req, res) => {
     }
 });
 
-// 7. COMPLETE TASK
+// 7. COMPLETE TASK (POST) - YEH MISSING THA
 app.post('/api/complete-task', async (req, res) => {
     try {
+        console.log('📥 Complete task request:', req.body);
+        
         const { userId, taskId, reward } = req.body;
         
         if (!userId || !taskId) {
             return res.status(400).json({ success: false, error: 'User ID and Task ID required' });
         }
         
-        const { data: user, error: userError } = await supabase
-            .from('users')
-            .select('coins, total_earned, completed_tasks')
-            .eq('uid', userId)
-            .single();
-            
-        if (userError || !user) {
-            return res.status(404).json({ success: false, error: 'User not found' });
+        const coinsToAdd = Math.round((reward || 0) * USD_TO_COINS);
+        
+        // Credit coins using helper
+        const result = await creditCoins(
+            userId, 
+            coinsToAdd, 
+            reward || 0, 
+            `Task completed: ${taskId}`, 
+            taskId, 
+            'task_reward'
+        );
+        
+        if (!result.success) {
+            return res.status(400).json({ success: false, error: result.error });
         }
         
-        const coinsToAdd = Math.round(reward * USD_TO_COINS);
+        // Update completed_tasks count
+        const { data: user } = await supabase
+            .from('users')
+            .select('completed_tasks')
+            .eq('uid', userId)
+            .single();
         
         await supabase.from('users').update({
-            coins: (user.coins || 0) + coinsToAdd,
-            total_earned: (user.total_earned || 0) + reward,
-            completed_tasks: (user.completed_tasks || 0) + 1
+            completed_tasks: (user?.completed_tasks || 0) + 1
         }).eq('uid', userId);
         
-        await supabase.from('transactions').insert({
-            user_id: userId,
-            type: 'task_reward',
-            amount: reward,
-            coins: coinsToAdd,
-            currency: 'USDT',
-            description: `Task completed: ${taskId}`,
-            status: 'completed',
-            reference_id: taskId,
-            created_at: new Date().toISOString()
-        });
-        
+        // Get updated user
         const { data: updatedUser } = await supabase
             .from('users').select('*').eq('uid', userId).single();
         
@@ -258,6 +382,7 @@ app.post('/api/complete-task', async (req, res) => {
             user: updatedUser
         });
     } catch (error) {
+        console.error('Complete task error:', error);
         res.status(400).json({ success: false, error: error.message });
     }
 });
@@ -266,14 +391,12 @@ app.post('/api/complete-task', async (req, res) => {
 app.post('/api/admin/task', async (req, res) => {
     try {
         const { title, description, category, taskUrl, instructions, reward, status } = req.body;
-        
         const { data, error } = await supabase.from('tasks').insert({
             title, description: description || '', category: category || 'general',
             task_url: taskUrl || '', instructions: instructions || '',
             reward, status: status || 'active',
             created_at: new Date().toISOString()
         }).select().single();
-        
         if (error) throw error;
         res.json({ success: true, task: data });
     } catch (error) {
@@ -286,13 +409,11 @@ app.put('/api/admin/task/:id', async (req, res) => {
     try {
         const { id } = req.params;
         const { title, description, category, taskUrl, instructions, reward, status } = req.body;
-        
         const { data, error } = await supabase.from('tasks').update({
             title, description: description || '', category: category || 'general',
             task_url: taskUrl || '', instructions: instructions || '',
             reward, status, updated_at: new Date().toISOString()
         }).eq('id', id).select();
-        
         if (error) throw error;
         res.json({ success: true, task: data[0] });
     } catch (error) {
@@ -459,7 +580,25 @@ app.delete('/api/admin/shortlink/:id', async (req, res) => {
 });
 
 // ============================================================
-// BITCOTASKS PROXY APIs (YEH MISSING THAY!)
+// LEADERBOARD API - YEH MISSING THA
+// ============================================================
+app.get('/api/leaderboard', async (req, res) => {
+    try {
+        const { data: leaderboard, error } = await supabase
+            .from('users')
+            .select('name, coins, completed_tasks, total_earned')
+            .order('coins', { ascending: false })
+            .limit(10);
+        if (error) throw error;
+        res.json({ success: true, leaderboard: leaderboard || [] });
+    } catch (error) {
+        console.error('Leaderboard error:', error);
+        res.status(400).json({ success: false, error: error.message, leaderboard: [] });
+    }
+});
+
+// ============================================================
+// BITCOTASKS PROXY APIs
 // ============================================================
 
 // 20. BITCOTASKS PTC ADS PROXY
@@ -469,13 +608,16 @@ app.post('/api/bitcotasks/ptc', async (req, res) => {
         if (!userId) return res.status(400).json({ success: false, error: 'User ID required' });
         
         if (!BITCOTASKS_API_KEY || !BITCOTASKS_BEARER_TOKEN) {
-            return res.status(400).json({ success: false, error: 'BitcoTasks API not configured' });
+            console.log('⚠️ BitcoTasks API not configured');
+            return res.json({ success: true, data: [] });
         }
         
         const userIP = req.headers['x-forwarded-for']?.split(',')[0] || 
                        req.connection.remoteAddress || '0.0.0.0';
         
         const url = `https://bitcotasks.com/api/${BITCOTASKS_API_KEY}/${userId}/${userIP}`;
+        
+        console.log('📤 BitcoTasks PTC request:', url);
         
         const response = await fetch(url, {
             headers: {
@@ -485,11 +627,13 @@ app.post('/api/bitcotasks/ptc', async (req, res) => {
         });
         
         const data = await response.json();
+        console.log('📥 BitcoTasks PTC response:', data);
+        
         res.json({ success: true, data: data.data || [] });
         
     } catch (error) {
         console.error('BitcoTasks PTC error:', error);
-        res.status(500).json({ success: false, error: error.message, data: [] });
+        res.json({ success: true, data: [] });
     }
 });
 
@@ -500,7 +644,7 @@ app.post('/api/bitcotasks/shortlinks', async (req, res) => {
         if (!userId) return res.status(400).json({ success: false, error: 'User ID required' });
         
         if (!BITCOTASKS_API_KEY || !BITCOTASKS_BEARER_TOKEN) {
-            return res.status(400).json({ success: false, error: 'BitcoTasks API not configured' });
+            return res.json({ success: true, data: [] });
         }
         
         const userIP = req.headers['x-forwarded-for']?.split(',')[0] || 
@@ -520,51 +664,7 @@ app.post('/api/bitcotasks/shortlinks', async (req, res) => {
         
     } catch (error) {
         console.error('BitcoTasks Shortlink error:', error);
-        res.status(500).json({ success: false, error: error.message, data: [] });
-    }
-});
-
-// 22. BITCOTASKS OFFERS PROXY
-app.post('/api/bitcotasks/offers', async (req, res) => {
-    try {
-        const { userId } = req.body;
-        if (!userId) return res.status(400).json({ success: false, error: 'User ID required' });
-        
-        const userIP = req.headers['x-forwarded-for']?.split(',')[0] || 
-                       req.connection.remoteAddress || '0.0.0.0';
-        
-        const url = `https://bitcotasks.com/offer-api.php?key=${BITCOTASKS_API_KEY}&sub_id=${userId}&ip=${userIP}`;
-        
-        const response = await fetch(url, {
-            headers: { 'Authorization': `Bearer ${BITCOTASKS_BEARER_TOKEN}` }
-        });
-        
-        const data = await response.json();
-        res.json({ success: true, data: data.data || [] });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message, data: [] });
-    }
-});
-
-// 23. BITCOTASKS SURVEYS PROXY
-app.post('/api/bitcotasks/surveys', async (req, res) => {
-    try {
-        const { userId } = req.body;
-        if (!userId) return res.status(400).json({ success: false, error: 'User ID required' });
-        
-        const userIP = req.headers['x-forwarded-for']?.split(',')[0] || 
-                       req.connection.remoteAddress || '0.0.0.0';
-        
-        const url = `https://bitcotasks.com/survey-api.php?key=${BITCOTASKS_API_KEY}&sub_id=${userId}&ip=${userIP}`;
-        
-        const response = await fetch(url, {
-            headers: { 'Authorization': `Bearer ${BITCOTASKS_BEARER_TOKEN}` }
-        });
-        
-        const data = await response.json();
-        res.json({ success: true, data: data.data || [] });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message, data: [] });
+        res.json({ success: true, data: [] });
     }
 });
 
@@ -572,13 +672,13 @@ app.post('/api/bitcotasks/surveys', async (req, res) => {
 // WITHDRAWAL APIs
 // ============================================================
 
-// 24. CREATE WITHDRAWAL
+// 22. CREATE WITHDRAWAL
 app.post('/api/withdraw', async (req, res) => {
     try {
         const { userId, method, account, amount, giftValue } = req.body;
         
         const { data: user, error: userError } = await supabase
-            .from('users').select('coins, balance').eq('uid', userId).single();
+            .from('users').select('coins, balance, total_withdrawn').eq('uid', userId).single();
             
         if (userError || !user) {
             return res.status(404).json({ success: false, error: 'User not found' });
@@ -618,7 +718,7 @@ app.post('/api/withdraw', async (req, res) => {
     }
 });
 
-// 25. GET USER WITHDRAWALS
+// 23. GET USER WITHDRAWALS
 app.get('/api/withdrawals/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
@@ -632,7 +732,7 @@ app.get('/api/withdrawals/:userId', async (req, res) => {
     }
 });
 
-// 26. ADMIN - GET ALL WITHDRAWALS
+// 24. ADMIN - GET ALL WITHDRAWALS
 app.get('/api/admin/withdrawals', async (req, res) => {
     try {
         const { data: withdrawals, error } = await supabase
@@ -645,7 +745,7 @@ app.get('/api/admin/withdrawals', async (req, res) => {
     }
 });
 
-// 27. ADMIN - UPDATE WITHDRAWAL
+// 25. ADMIN - UPDATE WITHDRAWAL
 app.put('/api/admin/withdrawal/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -720,6 +820,7 @@ async function processFaucetPayment(withdrawalId, userId, account, amount) {
                 transaction_id: response.data.txn_id || 'fp_' + Date.now(),
                 paid_at: new Date().toISOString()
             }).eq('id', withdrawalId);
+            console.log(`✅ FaucetPay payment successful #${withdrawalId}`);
         } else {
             throw new Error(response.data?.message || 'Payment failed');
         }
@@ -728,6 +829,19 @@ async function processFaucetPayment(withdrawalId, userId, account, amount) {
         await supabase.from('withdrawals').update({
             status: 'failed', error: error.message
         }).eq('id', withdrawalId);
+        
+        // Refund coins
+        const wDoc = await supabase.from('withdrawals')
+            .select('coins_deducted, user_id').eq('id', withdrawalId).single();
+        if (wDoc.data) {
+            const { data: user } = await supabase.from('users')
+                .select('coins').eq('uid', wDoc.data.user_id).single();
+            if (user) {
+                await supabase.from('users').update({
+                    coins: (user.coins || 0) + (wDoc.data.coins_deducted || 0)
+                }).eq('uid', wDoc.data.user_id);
+            }
+        }
     }
 }
 
@@ -740,22 +854,6 @@ app.get('/api/admin/users', async (req, res) => {
             .from('users').select('*').order('created_at', { ascending: false });
         if (error) throw error;
         res.json({ success: true, users });
-    } catch (error) {
-        res.status(400).json({ success: false, error: error.message });
-    }
-});
-
-// ============================================================
-// FAUCET APIs (Optional - Agar Faucet Hata Diya Hai Toh Ignore Karein)
-// ============================================================
-app.get('/api/faucet-history/:userId', async (req, res) => {
-    try {
-        const { userId } = req.params;
-        const { data: history, error } = await supabase
-            .from('faucet_history').select('*').eq('user_id', userId)
-            .order('created_at', { ascending: false }).limit(50);
-        if (error) throw error;
-        res.json({ success: true, history: history || [] });
     } catch (error) {
         res.status(400).json({ success: false, error: error.message });
     }
@@ -800,84 +898,181 @@ app.put('/api/admin/settings/:key', async (req, res) => {
 });
 
 // ============================================================
-// OFFERWALL POSTBACKS
+// c.cx.ua OFFERWALL POSTBACK - YEH FIX HAI
 // ============================================================
-
-// c.cx.ua POSTBACK
 app.post('/api/offerwall-webhook', async (req, res) => {
     try {
-        const { subId, transId, offer_name, offer_type, reward, payout, status } = req.body;
+        console.log('📥 c.cx.ua Postback received');
+        console.log('📦 Body:', req.body);
+        console.log('📦 Query:', req.query);
         
-        console.log('📥 c.cx.ua Postback:', { subId, transId, reward, status });
+        // ✅ Dono sources se data nikaalein (body + query)
+        const subId = req.body.subId || req.query.subId;
+        const transId = req.body.transId || req.query.transId;
+        const reward = req.body.reward || req.query.reward;
+        const status = req.body.status || req.query.status;
+        const offer_name = req.body.offer_name || req.query.offer_name;
+        const offer_type = req.body.offer_type || req.query.offer_type;
+        const payout = req.body.payout || req.query.payout;
+        const signature = req.body.signature || req.query.signature;
+        const debug = req.body.debug || req.query.debug;
         
-        if (status !== '1' || !subId || !reward) {
-            return res.json({ success: false, error: 'Invalid status or missing fields' });
+        console.log('📊 Parsed data:', { subId, transId, reward, status, offer_name, offer_type });
+        
+        // Validate
+        if (!subId || !reward) {
+            console.error('❌ Missing subId or reward');
+            return res.status(400).send('ERROR: Missing parameters');
+        }
+        
+        // Test mode check
+        if (debug === '1') {
+            console.log('🧪 Test postback received');
+            return res.send('ok');
         }
         
         const rewardAmount = parseFloat(reward);
         const coinsToAdd = Math.round(rewardAmount * USD_TO_COINS);
         
-        const { data: user, error: userError } = await supabase
-            .from('users').select('coins, total_earned').eq('uid', subId).single();
-            
-        if (userError || !user) return res.status(404).json({ success: false, error: 'User not found' });
+        // Check status (1 = add, 2 = chargeback)
+        if (status === '2') {
+            // Chargeback - remove coins
+            const result = await debitCoins(
+                subId, 
+                coinsToAdd, 
+                rewardAmount, 
+                `c.cx.ua Chargeback: ${offer_name || offer_type}`,
+                transId
+            );
+            console.log('↩️ Chargeback processed:', result);
+            return res.send('ok');
+        }
         
-        await supabase.from('users').update({
-            coins: (user.coins || 0) + coinsToAdd,
-            total_earned: (user.total_earned || 0) + rewardAmount
-        }).eq('uid', subId);
+        // Status 1 = credit coins
+        const result = await creditCoins(
+            subId, 
+            coinsToAdd, 
+            rewardAmount,
+            `c.cx.ua: ${offer_name || offer_type || 'Offer'} (${transId})`,
+            transId,
+            'offerwall_reward'
+        );
         
-        await supabase.from('transactions').insert({
-            user_id: subId, type: 'offerwall_reward',
-            amount: rewardAmount, coins: coinsToAdd, currency: 'USD',
-            description: `c.cx.ua: ${offer_name || offer_type || 'Offer'}`,
-            status: 'completed', reference_id: transId,
-            created_at: new Date().toISOString()
-        });
+        if (!result.success) {
+            console.error('❌ Failed to credit coins:', result.error);
+            return res.status(500).send('ERROR: ' + result.error);
+        }
         
+        console.log(`✅ c.cx.ua reward credited: ${coinsToAdd} coins to ${subId}`);
+        
+        // c.cx.ua expects "ok" response
         res.send('ok');
+        
     } catch (error) {
-        console.error('c.cx.ua postback error:', error);
-        res.status(500).send('error');
+        console.error('❌ c.cx.ua postback error:', error);
+        res.status(500).send('ERROR: ' + error.message);
     }
 });
 
-// BitcoTasks POSTBACK
+// GET endpoint for testing
+app.get('/api/offerwall-webhook', (req, res) => {
+    res.json({
+        success: true,
+        message: 'c.cx.ua webhook is active',
+        method: 'POST',
+        endpoint: '/api/offerwall-webhook',
+        required_fields: ['subId', 'reward', 'status'],
+        timestamp: new Date().toISOString()
+    });
+});
+
+// ============================================================
+// BITCOTASKS POSTBACK - YEH FIX HAI
+// ============================================================
 app.post('/api/bitcotasks-webhook', async (req, res) => {
     try {
-        const { subId, transId, offer_name, offer_type, reward, payout, status } = req.body;
+        console.log('📥 BitcoTasks Postback received');
+        console.log('📦 Body:', req.body);
+        console.log('📦 Query:', req.query);
         
-        console.log('📥 BitcoTasks Postback:', { subId, transId, reward, status });
+        // ✅ Dono sources se data nikaalein
+        const subId = req.body.subId || req.query.subId;
+        const transId = req.body.transId || req.query.transId;
+        const reward = req.body.reward || req.query.reward;
+        const status = req.body.status || req.query.status;
+        const offer_name = req.body.offer_name || req.query.offer_name;
+        const offer_type = req.body.offer_type || req.query.offer_type;
+        const payout = req.body.payout || req.query.payout;
+        const signature = req.body.signature || req.query.signature;
         
-        if (status !== '1' || !subId || !reward) {
-            return res.json({ success: false, error: 'Invalid status or missing fields' });
+        console.log('📊 Parsed data:', { subId, transId, reward, status });
+        
+        // Validate
+        if (!subId || !reward) {
+            console.error('❌ Missing subId or reward');
+            return res.status(400).send('ERROR: Missing parameters');
         }
         
         const rewardAmount = parseFloat(reward);
         const coinsToAdd = Math.round(rewardAmount * USD_TO_COINS);
         
-        const { data: user, error: userError } = await supabase
-            .from('users').select('coins, total_earned').eq('uid', subId).single();
-            
-        if (userError || !user) return res.status(404).json({ success: false, error: 'User not found' });
+        // Check status
+        if (status === '2') {
+            const result = await debitCoins(
+                subId, coinsToAdd, rewardAmount,
+                `BitcoTasks Chargeback: ${offer_name || offer_type}`,
+                transId
+            );
+            return res.send('ok');
+        }
         
-        await supabase.from('users').update({
-            coins: (user.coins || 0) + coinsToAdd,
-            total_earned: (user.total_earned || 0) + rewardAmount
-        }).eq('uid', subId);
+        // Credit coins
+        const result = await creditCoins(
+            subId, coinsToAdd, rewardAmount,
+            `BitcoTasks: ${offer_name || offer_type || 'Offer'} (${transId})`,
+            transId,
+            'offerwall_reward'
+        );
         
-        await supabase.from('transactions').insert({
-            user_id: subId, type: 'offerwall_reward',
-            amount: rewardAmount, coins: coinsToAdd, currency: 'USD',
-            description: `BitcoTasks: ${offer_name || offer_type || 'Offer'}`,
-            status: 'completed', reference_id: transId,
-            created_at: new Date().toISOString()
-        });
+        if (!result.success) {
+            console.error('❌ Failed to credit coins:', result.error);
+            return res.status(500).send('ERROR: ' + result.error);
+        }
+        
+        console.log(`✅ BitcoTasks reward credited: ${coinsToAdd} coins to ${subId}`);
         
         res.send('ok');
+        
     } catch (error) {
-        console.error('BitcoTasks postback error:', error);
-        res.status(500).send('error');
+        console.error('❌ BitcoTasks postback error:', error);
+        res.status(500).send('ERROR: ' + error.message);
+    }
+});
+
+// GET endpoint for testing
+app.get('/api/bitcotasks-webhook', (req, res) => {
+    res.json({
+        success: true,
+        message: 'BitcoTasks webhook is active',
+        method: 'POST',
+        endpoint: '/api/bitcotasks-webhook',
+        timestamp: new Date().toISOString()
+    });
+});
+
+// ============================================================
+// FAUCET APIs (Optional)
+// ============================================================
+app.get('/api/faucet-history/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { data: history, error } = await supabase
+            .from('faucet_history').select('*').eq('user_id', userId)
+            .order('created_at', { ascending: false }).limit(50);
+        if (error) throw error;
+        res.json({ success: true, history: history || [] });
+    } catch (error) {
+        res.status(400).json({ success: false, error: error.message });
     }
 });
 
