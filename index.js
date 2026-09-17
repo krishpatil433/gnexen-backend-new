@@ -35,22 +35,23 @@ const CX_SECRET_KEY = process.env.CX_SECRET_KEY;
 // MIDDLEWARE - SABSE IMPORTANT
 // ============================================================
 app.use(cors());
-
-// ✅ JSON parser (frontend API calls ke liye)
 app.use(express.json());
-
-// ✅ URL-encoded parser (c.cx.ua aur BitcoTasks postbacks ke liye)
 app.use(express.urlencoded({ extended: true }));
 
-// ✅ Custom parser - dono formats handle karega
+// ============================================================
+// DEBUG LOGGING MIDDLEWARE (Webhooks ke liye)
+// ============================================================
 app.use((req, res, next) => {
-    if (req.body && Buffer.isBuffer(req.body)) {
-        const bodyString = req.body.toString();
-        try {
-            req.body = JSON.parse(bodyString);
-        } catch (e) {
-            req.body = Object.fromEntries(new URLSearchParams(bodyString));
-        }
+    if (req.path.includes('webhook')) {
+        console.log('🔍 ===== WEBHOOK HIT =====');
+        console.log('   Time:', new Date().toISOString());
+        console.log('   Method:', req.method);
+        console.log('   Path:', req.path);
+        console.log('   Content-Type:', req.headers['content-type']);
+        console.log('   User-Agent:', req.headers['user-agent']);
+        console.log('   Body:', JSON.stringify(req.body));
+        console.log('   Query:', JSON.stringify(req.query));
+        console.log('   =========================');
     }
     next();
 });
@@ -75,10 +76,9 @@ function md5(string) {
     return crypto.createHash('md5').update(string).digest('hex');
 }
 
-// ✅ Credit coins to user (coins column update karta hai)
+// ✅ Credit coins to user
 async function creditCoins(userId, coinsToAdd, amountUSD, description, referenceId, type = 'offerwall_reward') {
     try {
-        // Get current user data
         const { data: user, error: userError } = await supabase
             .from('users')
             .select('coins, total_earned')
@@ -90,7 +90,6 @@ async function creditCoins(userId, coinsToAdd, amountUSD, description, reference
             return { success: false, error: 'User not found' };
         }
         
-        // Calculate new values
         const currentCoins = user.coins || 0;
         const currentEarned = user.total_earned || 0;
         const updatedCoins = currentCoins + coinsToAdd;
@@ -98,7 +97,6 @@ async function creditCoins(userId, coinsToAdd, amountUSD, description, reference
         
         console.log(`💰 Updating user ${userId}: ${currentCoins} + ${coinsToAdd} = ${updatedCoins} coins`);
         
-        // Update user (coins + total_earned)
         const { error: updateError } = await supabase
             .from('users')
             .update({
@@ -113,7 +111,6 @@ async function creditCoins(userId, coinsToAdd, amountUSD, description, reference
             return { success: false, error: updateError.message };
         }
         
-        // Create transaction record
         await supabase.from('transactions').insert({
             user_id: userId,
             type: type,
@@ -135,7 +132,7 @@ async function creditCoins(userId, coinsToAdd, amountUSD, description, reference
     }
 }
 
-// ✅ Debit coins from user (for chargebacks)
+// ✅ Debit coins from user (chargeback)
 async function debitCoins(userId, coinsToRemove, amountUSD, description, referenceId) {
     try {
         const { data: user, error: userError } = await supabase
@@ -340,7 +337,7 @@ app.get('/api/tasks', async (req, res) => {
     }
 });
 
-// 7. COMPLETE TASK (POST) - Frontend se call hota hai
+// 7. COMPLETE TASK
 app.post('/api/complete-task', async (req, res) => {
     try {
         console.log('📥 Complete task request:', req.body);
@@ -353,7 +350,6 @@ app.post('/api/complete-task', async (req, res) => {
         
         const coinsToAdd = Math.round((reward || 0) * USD_TO_COINS);
         
-        // Credit coins using helper
         const result = await creditCoins(
             userId, 
             coinsToAdd, 
@@ -367,7 +363,6 @@ app.post('/api/complete-task', async (req, res) => {
             return res.status(400).json({ success: false, error: result.error });
         }
         
-        // Update completed_tasks count
         const { data: user } = await supabase
             .from('users')
             .select('completed_tasks')
@@ -378,7 +373,6 @@ app.post('/api/complete-task', async (req, res) => {
             completed_tasks: (user?.completed_tasks || 0) + 1
         }).eq('uid', userId);
         
-        // Get updated user
         const { data: updatedUser } = await supabase
             .from('users').select('*').eq('uid', userId).single();
         
@@ -835,7 +829,6 @@ async function processFaucetPayment(withdrawalId, userId, account, amount) {
             status: 'failed', error: error.message
         }).eq('id', withdrawalId);
         
-        // Refund coins
         const wDoc = await supabase.from('withdrawals')
             .select('coins_deducted, user_id').eq('id', withdrawalId).single();
         if (wDoc.data) {
@@ -903,24 +896,24 @@ app.put('/api/admin/settings/:key', async (req, res) => {
 });
 
 // ============================================================
-// c.cx.ua OFFERWALL POSTBACK - MAIN FIX
+// c.cx.ua OFFERWALL POSTBACK
 // ============================================================
 app.post('/api/offerwall-webhook', async (req, res) => {
     try {
         console.log('📥 c.cx.ua Postback received');
-        console.log('📦 Body:', req.body);
-        console.log('📦 Query:', req.query);
         
-        // ✅ Dono sources se data nikaalein (body + query)
-        const subId = req.body.subId || req.query.subId;
-        const transId = req.body.transId || req.query.transId;
-        const reward = req.body.reward || req.query.reward;
-        const status = req.body.status || req.query.status;
-        const offer_name = req.body.offer_name || req.query.offer_name;
-        const offer_type = req.body.offer_type || req.query.offer_type;
-        const payout = req.body.payout || req.query.payout;
-        const signature = req.body.signature || req.query.signature;
-        const debug = req.body.debug || req.query.debug;
+        // ✅ Saare possible sources se data nikaalein
+        const data = { ...req.body, ...req.query };
+        
+        const subId = data.subId || data.sub_id || data.userId;
+        const transId = data.transId || data.trans_id || data.transaction_id;
+        const reward = data.reward || data.amount;
+        const status = data.status || '1';
+        const offer_name = data.offer_name || data.offerName;
+        const offer_type = data.offer_type || data.offerType;
+        const payout = data.payout;
+        const signature = data.signature;
+        const debug = data.debug;
         
         console.log('📊 Parsed data:', { subId, transId, reward, status, offer_name, offer_type });
         
@@ -930,36 +923,27 @@ app.post('/api/offerwall-webhook', async (req, res) => {
             return res.status(400).send('ERROR: Missing parameters');
         }
         
-        // Test mode check
+        // Test mode
         if (debug === '1') {
-            console.log('🧪 Test postback received');
+            console.log('🧪 Test postback');
             return res.send('ok');
         }
         
         const rewardAmount = parseFloat(reward);
         const coinsToAdd = Math.round(rewardAmount * USD_TO_COINS);
         
-        // Check status (1 = add, 2 = chargeback)
+        // Chargeback
         if (status === '2') {
-            const result = await debitCoins(
-                subId, 
-                coinsToAdd, 
-                rewardAmount, 
-                `c.cx.ua Chargeback: ${offer_name || offer_type}`,
-                transId
-            );
-            console.log('↩️ Chargeback processed:', result);
+            await debitCoins(subId, coinsToAdd, rewardAmount, 
+                `c.cx.ua Chargeback: ${offer_name || offer_type}`, transId);
             return res.send('ok');
         }
         
-        // Status 1 = credit coins
+        // Credit coins
         const result = await creditCoins(
-            subId, 
-            coinsToAdd, 
-            rewardAmount,
+            subId, coinsToAdd, rewardAmount,
             `c.cx.ua: ${offer_name || offer_type || 'Offer'} (${transId})`,
-            transId,
-            'offerwall_reward'
+            transId, 'offerwall_reward'
         );
         
         if (!result.success) {
@@ -968,8 +952,6 @@ app.post('/api/offerwall-webhook', async (req, res) => {
         }
         
         console.log(`✅ c.cx.ua reward credited: ${coinsToAdd} coins to ${subId}`);
-        
-        // c.cx.ua expects "ok" response
         res.send('ok');
         
     } catch (error) {
@@ -996,17 +978,15 @@ app.get('/api/offerwall-webhook', (req, res) => {
 app.post('/api/bitcotasks-webhook', async (req, res) => {
     try {
         console.log('📥 BitcoTasks Postback received');
-        console.log('📦 Body:', req.body);
-        console.log('📦 Query:', req.query);
         
-        // ✅ Dono sources se data nikaalein
-        const subId = req.body.subId || req.query.subId;
-        const transId = req.body.transId || req.query.transId;
-        const reward = req.body.reward || req.query.reward;
-        const status = req.body.status || req.query.status;
-        const offer_name = req.body.offer_name || req.query.offer_name;
-        const offer_type = req.body.offer_type || req.query.offer_type;
-        const payout = req.body.payout || req.query.payout;
+        const data = { ...req.body, ...req.query };
+        
+        const subId = data.subId || data.sub_id;
+        const transId = data.transId || data.trans_id;
+        const reward = data.reward;
+        const status = data.status || '1';
+        const offer_name = data.offer_name;
+        const offer_type = data.offer_type;
         
         console.log('📊 Parsed data:', { subId, transId, reward, status });
         
@@ -1018,22 +998,16 @@ app.post('/api/bitcotasks-webhook', async (req, res) => {
         const rewardAmount = parseFloat(reward);
         const coinsToAdd = Math.round(rewardAmount * USD_TO_COINS);
         
-        // Check status
         if (status === '2') {
-            await debitCoins(
-                subId, coinsToAdd, rewardAmount,
-                `BitcoTasks Chargeback: ${offer_name || offer_type}`,
-                transId
-            );
+            await debitCoins(subId, coinsToAdd, rewardAmount,
+                `BitcoTasks Chargeback: ${offer_name || offer_type}`, transId);
             return res.send('ok');
         }
         
-        // Credit coins
         const result = await creditCoins(
             subId, coinsToAdd, rewardAmount,
             `BitcoTasks: ${offer_name || offer_type || 'Offer'} (${transId})`,
-            transId,
-            'offerwall_reward'
+            transId, 'offerwall_reward'
         );
         
         if (!result.success) {
@@ -1042,7 +1016,6 @@ app.post('/api/bitcotasks-webhook', async (req, res) => {
         }
         
         console.log(`✅ BitcoTasks reward credited: ${coinsToAdd} coins to ${subId}`);
-        
         res.send('ok');
         
     } catch (error) {
@@ -1060,22 +1033,6 @@ app.get('/api/bitcotasks-webhook', (req, res) => {
         endpoint: '/api/bitcotasks-webhook',
         timestamp: new Date().toISOString()
     });
-});
-
-// ============================================================
-// FAUCET APIs (Optional)
-// ============================================================
-app.get('/api/faucet-history/:userId', async (req, res) => {
-    try {
-        const { userId } = req.params;
-        const { data: history, error } = await supabase
-            .from('faucet_history').select('*').eq('user_id', userId)
-            .order('created_at', { ascending: false }).limit(50);
-        if (error) throw error;
-        res.json({ success: true, history: history || [] });
-    } catch (error) {
-        res.status(400).json({ success: false, error: error.message });
-    }
 });
 
 // ============================================================
