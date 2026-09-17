@@ -32,18 +32,15 @@ const BITCOTASKS_SECRET_KEY = process.env.BITCOTASKS_SECRET_KEY;
 const CX_SECRET_KEY = process.env.CX_SECRET_KEY;
 
 // ============================================================
-// MIDDLEWARE - YEH SABSE IMPORTANT HAI
+// MIDDLEWARE - SABSE IMPORTANT
 // ============================================================
 app.use(cors());
 
 // ✅ JSON parser (frontend API calls ke liye)
 app.use(express.json());
 
-// ✅ URL-encoded parser (offerwall postbacks ke liye)
+// ✅ URL-encoded parser (c.cx.ua aur BitcoTasks postbacks ke liye)
 app.use(express.urlencoded({ extended: true }));
-
-// ✅ Raw body parser (signature verification ke liye)
-app.use(express.raw({ type: 'application/x-www-form-urlencoded' }));
 
 // ✅ Custom parser - dono formats handle karega
 app.use((req, res, next) => {
@@ -78,10 +75,10 @@ function md5(string) {
     return crypto.createHash('md5').update(string).digest('hex');
 }
 
-// Credit coins to user
+// ✅ Credit coins to user (coins column update karta hai)
 async function creditCoins(userId, coinsToAdd, amountUSD, description, referenceId, type = 'offerwall_reward') {
     try {
-        // Get user
+        // Get current user data
         const { data: user, error: userError } = await supabase
             .from('users')
             .select('coins, total_earned')
@@ -93,15 +90,21 @@ async function creditCoins(userId, coinsToAdd, amountUSD, description, reference
             return { success: false, error: 'User not found' };
         }
         
-        // Update user
-        const updatedCoins = (user.coins || 0) + coinsToAdd;
-        const updatedEarned = (user.total_earned || 0) + amountUSD;
+        // Calculate new values
+        const currentCoins = user.coins || 0;
+        const currentEarned = user.total_earned || 0;
+        const updatedCoins = currentCoins + coinsToAdd;
+        const updatedEarned = currentEarned + amountUSD;
         
+        console.log(`💰 Updating user ${userId}: ${currentCoins} + ${coinsToAdd} = ${updatedCoins} coins`);
+        
+        // Update user (coins + total_earned)
         const { error: updateError } = await supabase
             .from('users')
             .update({
                 coins: updatedCoins,
-                total_earned: updatedEarned
+                total_earned: updatedEarned,
+                updated_at: new Date().toISOString()
             })
             .eq('uid', userId);
             
@@ -110,7 +113,7 @@ async function creditCoins(userId, coinsToAdd, amountUSD, description, reference
             return { success: false, error: updateError.message };
         }
         
-        // Create transaction
+        // Create transaction record
         await supabase.from('transactions').insert({
             user_id: userId,
             type: type,
@@ -132,7 +135,7 @@ async function creditCoins(userId, coinsToAdd, amountUSD, description, reference
     }
 }
 
-// Debit coins from user (for chargebacks)
+// ✅ Debit coins from user (for chargebacks)
 async function debitCoins(userId, coinsToRemove, amountUSD, description, referenceId) {
     try {
         const { data: user, error: userError } = await supabase
@@ -143,11 +146,15 @@ async function debitCoins(userId, coinsToRemove, amountUSD, description, referen
             
         if (userError || !user) return { success: false, error: 'User not found' };
         
+        const newCoins = Math.max(0, (user.coins || 0) - coinsToRemove);
+        const newEarned = Math.max(0, (user.total_earned || 0) - amountUSD);
+        
         await supabase
             .from('users')
             .update({
-                coins: Math.max(0, (user.coins || 0) - coinsToRemove),
-                total_earned: Math.max(0, (user.total_earned || 0) - amountUSD)
+                coins: newCoins,
+                total_earned: newEarned,
+                updated_at: new Date().toISOString()
             })
             .eq('uid', userId);
         
@@ -163,6 +170,7 @@ async function debitCoins(userId, coinsToRemove, amountUSD, description, referen
             created_at: new Date().toISOString()
         });
         
+        console.log(`↩️ Debited ${coinsToRemove} coins from user ${userId}`);
         return { success: true };
     } catch (error) {
         return { success: false, error: error.message };
@@ -332,7 +340,7 @@ app.get('/api/tasks', async (req, res) => {
     }
 });
 
-// 7. COMPLETE TASK (POST) - YEH MISSING THA
+// 7. COMPLETE TASK (POST) - Frontend se call hota hai
 app.post('/api/complete-task', async (req, res) => {
     try {
         console.log('📥 Complete task request:', req.body);
@@ -580,7 +588,7 @@ app.delete('/api/admin/shortlink/:id', async (req, res) => {
 });
 
 // ============================================================
-// LEADERBOARD API - YEH MISSING THA
+// LEADERBOARD API
 // ============================================================
 app.get('/api/leaderboard', async (req, res) => {
     try {
@@ -617,8 +625,6 @@ app.post('/api/bitcotasks/ptc', async (req, res) => {
         
         const url = `https://bitcotasks.com/api/${BITCOTASKS_API_KEY}/${userId}/${userIP}`;
         
-        console.log('📤 BitcoTasks PTC request:', url);
-        
         const response = await fetch(url, {
             headers: {
                 'Authorization': `Bearer ${BITCOTASKS_BEARER_TOKEN}`,
@@ -627,8 +633,6 @@ app.post('/api/bitcotasks/ptc', async (req, res) => {
         });
         
         const data = await response.json();
-        console.log('📥 BitcoTasks PTC response:', data);
-        
         res.json({ success: true, data: data.data || [] });
         
     } catch (error) {
@@ -705,7 +709,8 @@ app.post('/api/withdraw', async (req, res) => {
         
         await supabase.from('users').update({
             coins: user.coins - requiredCoins,
-            total_withdrawn: (user.total_withdrawn || 0) + amount
+            total_withdrawn: (user.total_withdrawn || 0) + amount,
+            updated_at: new Date().toISOString()
         }).eq('uid', userId);
         
         if (method === 'faucetpay') {
@@ -898,7 +903,7 @@ app.put('/api/admin/settings/:key', async (req, res) => {
 });
 
 // ============================================================
-// c.cx.ua OFFERWALL POSTBACK - YEH FIX HAI
+// c.cx.ua OFFERWALL POSTBACK - MAIN FIX
 // ============================================================
 app.post('/api/offerwall-webhook', async (req, res) => {
     try {
@@ -936,7 +941,6 @@ app.post('/api/offerwall-webhook', async (req, res) => {
         
         // Check status (1 = add, 2 = chargeback)
         if (status === '2') {
-            // Chargeback - remove coins
             const result = await debitCoins(
                 subId, 
                 coinsToAdd, 
@@ -987,7 +991,7 @@ app.get('/api/offerwall-webhook', (req, res) => {
 });
 
 // ============================================================
-// BITCOTASKS POSTBACK - YEH FIX HAI
+// BITCOTASKS POSTBACK
 // ============================================================
 app.post('/api/bitcotasks-webhook', async (req, res) => {
     try {
@@ -1003,11 +1007,9 @@ app.post('/api/bitcotasks-webhook', async (req, res) => {
         const offer_name = req.body.offer_name || req.query.offer_name;
         const offer_type = req.body.offer_type || req.query.offer_type;
         const payout = req.body.payout || req.query.payout;
-        const signature = req.body.signature || req.query.signature;
         
         console.log('📊 Parsed data:', { subId, transId, reward, status });
         
-        // Validate
         if (!subId || !reward) {
             console.error('❌ Missing subId or reward');
             return res.status(400).send('ERROR: Missing parameters');
@@ -1018,7 +1020,7 @@ app.post('/api/bitcotasks-webhook', async (req, res) => {
         
         // Check status
         if (status === '2') {
-            const result = await debitCoins(
+            await debitCoins(
                 subId, coinsToAdd, rewardAmount,
                 `BitcoTasks Chargeback: ${offer_name || offer_type}`,
                 transId
